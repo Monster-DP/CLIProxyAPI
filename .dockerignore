@@ -16,6 +16,7 @@ README_CN.md
 LICENSE
 
 # Runtime data folders (should be mounted as volumes)
+data/*
 auths/*
 logs/*
 conv/*

@@ -18,11 +18,12 @@ FROM alpine:3.22.0
 
 RUN apk add --no-cache tzdata
 
-RUN mkdir /CLIProxyAPI
+RUN mkdir -p /CLIProxyAPI /CLIProxyAPI/data /CLIProxyAPI/logs /root/.cli-proxy-api
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+COPY docker-entrypoint.sh /CLIProxyAPI/docker-entrypoint.sh
 
 WORKDIR /CLIProxyAPI
 
@@ -31,5 +32,6 @@ EXPOSE 8317
 ENV TZ=Asia/Shanghai
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+RUN chmod +x /CLIProxyAPI/docker-entrypoint.sh
 
-CMD ["./CLIProxyAPI"]
+ENTRYPOINT ["/CLIProxyAPI/docker-entrypoint.sh"]

@@ -15,9 +15,15 @@ STATS_DIR="temp/stats"
 STATS_FILE="${STATS_DIR}/.usage_backup.json"
 SECRET_FILE="${STATS_DIR}/.api_secret"
 WITH_USAGE=false
+MANAGEMENT_PASSWORD_DISPLAY="${MANAGEMENT_PASSWORD:-6987139899}"
 
 get_port() {
-  if [[ -f "config.yaml" ]]; then
+  local config_dir="${CLI_PROXY_CONFIG_DIR:-data}"
+  local runtime_config="${config_dir}/config.yaml"
+
+  if [[ -f "${runtime_config}" ]]; then
+    grep -E "^port:" "${runtime_config}" | sed -E 's/^port: *["'"'"']?([0-9]+)["'"'"']?.*$/\1/'
+  elif [[ -f "config.yaml" ]]; then
     grep -E "^port:" config.yaml | sed -E 's/^port: *["'"'"']?([0-9]+)["'"'"']?.*$/\1/'
   else
     echo "8317"
@@ -134,6 +140,9 @@ case "$choice" in
     fi
     echo "Services are starting from remote image."
     echo "Run 'docker compose logs -f' to see the logs."
+    echo "Management UI: http://localhost:$(get_port)/management.html"
+    echo "Management password: ${MANAGEMENT_PASSWORD_DISPLAY}"
+    echo "Need OAuth callback ports too? Run with: docker compose -f docker-compose.yml -f docker-compose.oauth.yml up -d"
     ;;
   2)
     echo "--- Building from Source and Running ---"
@@ -172,6 +181,9 @@ case "$choice" in
 
     echo "Build complete. Services are starting."
     echo "Run 'docker compose logs -f' to see the logs."
+    echo "Management UI: http://localhost:$(get_port)/management.html"
+    echo "Management password: ${MANAGEMENT_PASSWORD_DISPLAY}"
+    echo "Need OAuth callback ports too? Run with: docker compose -f docker-compose.yml -f docker-compose.oauth.yml up -d"
     ;;
   *)
     echo "Invalid choice. Please enter 1 or 2."
