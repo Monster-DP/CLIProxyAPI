@@ -5,6 +5,7 @@
 
 # Stop script execution on any error
 $ErrorActionPreference = "Stop"
+$ManagementPassword = if ($env:MANAGEMENT_PASSWORD) { $env:MANAGEMENT_PASSWORD } else { "6987139899" }
 
 # --- Step 1: Choose Environment ---
 Write-Host "Please select an option:"
@@ -19,6 +20,9 @@ switch ($choice) {
         docker compose up -d --remove-orphans --no-build
         Write-Host "Services are starting from remote image."
         Write-Host "Run 'docker compose logs -f' to see the logs."
+        Write-Host "Management UI: http://localhost:8317/management.html"
+        Write-Host "Management password: $ManagementPassword"
+        Write-Host "Need OAuth callback ports too? Run: docker compose -f docker-compose.yml -f docker-compose.oauth.yml up -d"
     }
     "2" {
         Write-Host "--- Building from Source and Running ---"
@@ -45,6 +49,9 @@ switch ($choice) {
 
         Write-Host "Build complete. Services are starting."
         Write-Host "Run 'docker compose logs -f' to see the logs."
+        Write-Host "Management UI: http://localhost:8317/management.html"
+        Write-Host "Management password: $ManagementPassword"
+        Write-Host "Need OAuth callback ports too? Run: docker compose -f docker-compose.yml -f docker-compose.oauth.yml up -d"
     }
     default {
         Write-Host "Invalid choice. Please enter 1 or 2."
