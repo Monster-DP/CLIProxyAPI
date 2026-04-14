@@ -72,6 +72,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ForceModelPrefix != newCfg.ForceModelPrefix {
 		changes = append(changes, fmt.Sprintf("force-model-prefix: %t -> %t", oldCfg.ForceModelPrefix, newCfg.ForceModelPrefix))
 	}
+	if oldCfg.Streaming.FirstByteTimeoutMS != newCfg.Streaming.FirstByteTimeoutMS {
+		changes = append(changes, fmt.Sprintf("streaming.first-byte-timeout-ms: %d -> %d", oldCfg.Streaming.FirstByteTimeoutMS, newCfg.Streaming.FirstByteTimeoutMS))
+	}
 	if oldCfg.NonStreamKeepAliveInterval != newCfg.NonStreamKeepAliveInterval {
 		changes = append(changes, fmt.Sprintf("nonstream-keepalive-interval: %d -> %d", oldCfg.NonStreamKeepAliveInterval, newCfg.NonStreamKeepAliveInterval))
 	}

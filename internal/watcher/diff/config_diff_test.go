@@ -240,6 +240,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			ProxyURL:                   "http://old-proxy",
 			APIKeys:                    []string{"key-1"},
 			ForceModelPrefix:           false,
+			Streaming:                  sdkconfig.StreamingConfig{FirstByteTimeoutMS: 0},
 			NonStreamKeepAliveInterval: 0,
 		},
 	}
@@ -280,6 +281,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 			ProxyURL:                   "http://new-proxy",
 			APIKeys:                    []string{" key-1 ", "key-2"},
 			ForceModelPrefix:           true,
+			Streaming:                  sdkconfig.StreamingConfig{FirstByteTimeoutMS: 8000},
 			NonStreamKeepAliveInterval: 5,
 		},
 	}
@@ -297,6 +299,7 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, details, "ws-auth: false -> true")
 	expectContains(t, details, "force-model-prefix: false -> true")
+	expectContains(t, details, "streaming.first-byte-timeout-ms: 0 -> 8000")
 	expectContains(t, details, "nonstream-keepalive-interval: 0 -> 5")
 	expectContains(t, details, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, details, "quota-exceeded.switch-preview-model: false -> true")
@@ -411,6 +414,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			RequestLog: true,
 			ProxyURL:   "http://new-proxy",
 			APIKeys:    []string{"keyB"},
+			Streaming:  sdkconfig.StreamingConfig{FirstByteTimeoutMS: 5000},
 		},
 		OAuthExcludedModels: map[string][]string{"p1": {"b", "c"}, "p2": {"d"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
@@ -442,6 +446,7 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	expectContains(t, changes, "max-retry-interval: 1 -> 3")
 	expectContains(t, changes, "proxy-url: http://old-proxy -> http://new-proxy")
 	expectContains(t, changes, "ws-auth: false -> true")
+	expectContains(t, changes, "streaming.first-byte-timeout-ms: 0 -> 5000")
 	expectContains(t, changes, "quota-exceeded.switch-project: false -> true")
 	expectContains(t, changes, "quota-exceeded.switch-preview-model: false -> true")
 	expectContains(t, changes, "quota-exceeded.antigravity-credits: false -> true")

@@ -224,6 +224,62 @@ func (e *authFallbackExecutor) StreamCalls() []string {
 	return out
 }
 
+type firstByteTimeoutAuthExecutor struct {
+	id string
+
+	mu           sync.Mutex
+	streamCalls  []string
+	hangingAuths map[string]struct{}
+}
+
+func (e *firstByteTimeoutAuthExecutor) Identifier() string {
+	return e.id
+}
+
+func (e *firstByteTimeoutAuthExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "Execute not implemented"}
+}
+
+func (e *firstByteTimeoutAuthExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.streamCalls = append(e.streamCalls, auth.ID)
+	_, hang := e.hangingAuths[auth.ID]
+	e.mu.Unlock()
+
+	ch := make(chan cliproxyexecutor.StreamChunk, 1)
+	if hang {
+		go func() {
+			<-ctx.Done()
+			close(ch)
+		}()
+		return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Auth": {auth.ID}}, Chunks: ch}, nil
+	}
+
+	ch <- cliproxyexecutor.StreamChunk{Payload: []byte(auth.ID)}
+	close(ch)
+	return &cliproxyexecutor.StreamResult{Headers: http.Header{"X-Auth": {auth.ID}}, Chunks: ch}, nil
+}
+
+func (e *firstByteTimeoutAuthExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+
+func (e *firstByteTimeoutAuthExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "CountTokens not implemented"}
+}
+
+func (e *firstByteTimeoutAuthExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *firstByteTimeoutAuthExecutor) StreamCalls() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.streamCalls))
+	copy(out, e.streamCalls)
+	return out
+}
+
 type retryAfterStatusError struct {
 	status     int
 	message    string
@@ -479,6 +535,91 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 	if state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+}
+
+func TestManagerExecuteStream_FirstByteTimeoutFallsBackAndSuspendsAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			Streaming: internalconfig.StreamingConfig{
+				FirstByteTimeoutMS: 20,
+			},
+		},
+	})
+	executor := &firstByteTimeoutAuthExecutor{
+		id:           "claude",
+		hangingAuths: map[string]struct{}{"aa-slow-auth": {}},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	slowAuth := &Auth{ID: "aa-slow-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(slowAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(slowAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), slowAuth); errRegister != nil {
+		t.Fatalf("register slow auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	for i := 0; i < 2; i++ {
+		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute stream %d error = %v, want success", i, errExecute)
+		}
+		var payload []byte
+		for chunk := range streamResult.Chunks {
+			if chunk.Err != nil {
+				t.Fatalf("execute stream %d chunk error = %v, want success", i, chunk.Err)
+			}
+			payload = append(payload, chunk.Payload...)
+		}
+		if string(payload) != goodAuth.ID {
+			t.Fatalf("execute stream %d payload = %q, want %q", i, string(payload), goodAuth.ID)
+		}
+	}
+
+	got := executor.StreamCalls()
+	want := []string{slowAuth.ID, goodAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedSlow, ok := m.GetByID(slowAuth.ID)
+	if !ok || updatedSlow == nil {
+		t.Fatalf("expected slow auth to remain registered")
+	}
+	state := updatedSlow.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected slow auth model state for %q", model)
+	}
+	if !state.Unavailable {
+		t.Fatalf("expected slow auth model state to be unavailable")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected slow auth cooldown to be set")
+	}
+	if state.LastError == nil {
+		t.Fatalf("expected slow auth last error to be recorded")
+	}
+	if state.LastError.HTTPStatus != http.StatusRequestTimeout {
+		t.Fatalf("last error status = %d, want %d", state.LastError.HTTPStatus, http.StatusRequestTimeout)
 	}
 }
 
