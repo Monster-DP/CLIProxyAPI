@@ -176,6 +176,11 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 
 		eventData := bytes.TrimSpace(line[5:])
+		if eventErr, ok := parseCodexStreamEventError(eventData); ok {
+			helps.RecordAPIResponseError(ctx, e.cfg, eventErr)
+			err = eventErr
+			return resp, err
+		}
 		eventType := gjson.GetBytes(eventData, "type").String()
 
 		if eventType == "response.output_item.done" {
@@ -420,6 +425,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 
 			if bytes.HasPrefix(line, dataTag) {
 				data := bytes.TrimSpace(line[5:])
+				if eventErr, ok := parseCodexStreamEventError(data); ok {
+					helps.RecordAPIResponseError(ctx, e.cfg, eventErr)
+					reporter.PublishFailure(ctx)
+					out <- cliproxyexecutor.StreamChunk{Err: eventErr}
+					return
+				}
 				if gjson.GetBytes(data, "type").String() == "response.completed" {
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
@@ -770,6 +781,96 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 		}
 	}
 	return false
+}
+
+func parseCodexStreamEventError(eventData []byte) (error, bool) {
+	if len(eventData) == 0 {
+		return nil, false
+	}
+
+	eventType := strings.TrimSpace(gjson.GetBytes(eventData, "type").String())
+	if eventType == "" {
+		return nil, false
+	}
+
+	errNodePath := ""
+	switch eventType {
+	case "error":
+		errNodePath = "error"
+	case "response.failed", "response.incomplete":
+		errNodePath = "response.error"
+		if !gjson.GetBytes(eventData, errNodePath).Exists() {
+			errNodePath = "error"
+		}
+	default:
+		return nil, false
+	}
+
+	errNode := gjson.GetBytes(eventData, errNodePath)
+	if !errNode.Exists() || errNode.Type == gjson.Null {
+		return nil, false
+	}
+
+	statusCode := codexStreamEventStatusCode(eventData, eventType, errNode)
+	errBody := codexStreamEventErrorBody(eventData, errNode)
+	return newCodexStatusErr(statusCode, errBody), true
+}
+
+func codexStreamEventStatusCode(eventData []byte, eventType string, errNode gjson.Result) int {
+	if status := int(gjson.GetBytes(eventData, "status").Int()); status > 0 {
+		return status
+	}
+	if status := int(gjson.GetBytes(eventData, "status_code").Int()); status > 0 {
+		return status
+	}
+	if strings.HasPrefix(eventType, "response.") {
+		if status := int(gjson.GetBytes(eventData, "response.status").Int()); status > 0 {
+			return status
+		}
+		if status := int(gjson.GetBytes(eventData, "response.status_code").Int()); status > 0 {
+			return status
+		}
+	}
+
+	errType := strings.TrimSpace(gjson.GetBytes([]byte(errNode.Raw), "type").String())
+	switch errType {
+	case "invalid_request_error":
+		return http.StatusBadRequest
+	case "authentication_error":
+		return http.StatusUnauthorized
+	case "permission_error":
+		return http.StatusForbidden
+	case "not_found_error":
+		return http.StatusNotFound
+	case "rate_limit_error", "usage_limit_reached":
+		return http.StatusTooManyRequests
+	case "server_error", "overloaded_error":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+func codexStreamEventErrorBody(eventData []byte, errNode gjson.Result) []byte {
+	body := []byte(`{}`)
+	switch errNode.Type {
+	case gjson.JSON:
+		body, _ = sjson.SetRawBytes(body, "error", []byte(errNode.Raw))
+	default:
+		msg := strings.TrimSpace(errNode.String())
+		if msg != "" {
+			body, _ = sjson.SetBytes(body, "error.message", msg)
+		}
+	}
+
+	if strings.TrimSpace(gjson.GetBytes(body, "error.message").String()) == "" {
+		if msg := strings.TrimSpace(gjson.GetBytes(eventData, "message").String()); msg != "" {
+			body, _ = sjson.SetBytes(body, "error.message", msg)
+		} else {
+			body, _ = sjson.SetBytes(body, "error.message", strings.TrimSpace(string(eventData)))
+		}
+	}
+	return body
 }
 
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {

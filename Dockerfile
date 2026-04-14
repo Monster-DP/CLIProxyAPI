@@ -32,6 +32,6 @@ EXPOSE 8317
 ENV TZ=Asia/Shanghai
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
-RUN chmod +x /CLIProxyAPI/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /CLIProxyAPI/docker-entrypoint.sh && chmod +x /CLIProxyAPI/docker-entrypoint.sh
 
 ENTRYPOINT ["/CLIProxyAPI/docker-entrypoint.sh"]

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -620,6 +621,122 @@ func TestManagerExecuteStream_FirstByteTimeoutFallsBackAndSuspendsAuth(t *testin
 	}
 	if state.LastError.HTTPStatus != http.StatusRequestTimeout {
 		t.Fatalf("last error status = %d, want %d", state.LastError.HTTPStatus, http.StatusRequestTimeout)
+	}
+}
+
+func TestManager_Execute_ExhaustedFailuresIncludeAttemptCount(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-rate-limited": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+			"bb-rate-limited": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	authA := &Auth{ID: "aa-rate-limited", Provider: "claude"}
+	authB := &Auth{ID: "bb-rate-limited", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authA.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(authB.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authA.ID)
+		reg.UnregisterClient(authB.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), authA); errRegister != nil {
+		t.Fatalf("register authA: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), authB); errRegister != nil {
+		t.Fatalf("register authB: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected error after all matching credentials failed")
+	}
+	if got := statusCodeFromError(errExecute); got != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if !strings.Contains(errExecute.Error(), "after trying 2 credential(s)") {
+		t.Fatalf("error = %q, want attempt count context", errExecute.Error())
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{authA.ID, authB.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManager_ExecuteStream_ExhaustedFailuresIncludeAttemptCount(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &authFallbackExecutor{
+		id: "claude",
+		streamFirstErrors: map[string]error{
+			"aa-bad-gateway": &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+			"bb-bad-gateway": &Error{HTTPStatus: http.StatusBadGateway, Message: "bad gateway"},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	authA := &Auth{ID: "aa-bad-gateway", Provider: "claude"}
+	authB := &Auth{ID: "bb-bad-gateway", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authA.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(authB.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authA.ID)
+		reg.UnregisterClient(authB.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), authA); errRegister != nil {
+		t.Fatalf("register authA: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), authB); errRegister != nil {
+		t.Fatalf("register authB: %v", errRegister)
+	}
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want stream error result", errExecute)
+	}
+	if streamResult == nil {
+		t.Fatal("expected stream result")
+	}
+	chunk, ok := <-streamResult.Chunks
+	if !ok {
+		t.Fatal("expected terminal stream error chunk")
+	}
+	if chunk.Err == nil {
+		t.Fatal("expected terminal stream error")
+	}
+	if got := statusCodeFromError(chunk.Err); got != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", got, http.StatusBadGateway)
+	}
+	if !strings.Contains(chunk.Err.Error(), "after trying 2 credential(s)") {
+		t.Fatalf("error = %q, want attempt count context", chunk.Err.Error())
+	}
+
+	got := executor.StreamCalls()
+	want := []string{authA.ID, authB.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

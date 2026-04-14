@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -682,6 +683,11 @@ type streamBootstrapError struct {
 	headers http.Header
 }
 
+type exhaustedCredentialError struct {
+	cause         error
+	attemptedAuth int
+}
+
 func cloneHTTPHeader(headers http.Header) http.Header {
 	if headers == nil {
 		return nil
@@ -718,6 +724,62 @@ func (e *streamBootstrapError) Headers() http.Header {
 		return nil
 	}
 	return cloneHTTPHeader(e.headers)
+}
+
+func (e *exhaustedCredentialError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	if e.attemptedAuth <= 1 {
+		return e.cause.Error()
+	}
+	return fmt.Sprintf("all matching credentials failed after trying %d credential(s); last error: %s", e.attemptedAuth, e.cause.Error())
+}
+
+func (e *exhaustedCredentialError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func (e *exhaustedCredentialError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return statusCodeFromError(e.cause)
+}
+
+func (e *exhaustedCredentialError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	return retryAfterFromError(e.cause)
+}
+
+func (e *exhaustedCredentialError) Headers() http.Header {
+	if e == nil || e.cause == nil {
+		return nil
+	}
+	type headerProvider interface {
+		Headers() http.Header
+	}
+	var provider headerProvider
+	if !errors.As(e.cause, &provider) || provider == nil {
+		return nil
+	}
+	return cloneHTTPHeader(provider.Headers())
+}
+
+func wrapExhaustedCredentialError(err error, attemptedAuth int) error {
+	if err == nil || attemptedAuth <= 1 {
+		return err
+	}
+	var existing *exhaustedCredentialError
+	if errors.As(err, &existing) && existing != nil {
+		return err
+	}
+	return &exhaustedCredentialError{cause: err, attemptedAuth: attemptedAuth}
 }
 
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
@@ -1311,14 +1373,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, lastErr
+				return cliproxyexecutor.Response{}, wrapExhaustedCredentialError(lastErr, len(attempted))
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, lastErr
+				return cliproxyexecutor.Response{}, wrapExhaustedCredentialError(lastErr, len(attempted))
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
@@ -1389,14 +1451,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, lastErr
+				return cliproxyexecutor.Response{}, wrapExhaustedCredentialError(lastErr, len(attempted))
 			}
 			return cliproxyexecutor.Response{}, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
 			if lastErr != nil {
-				return cliproxyexecutor.Response{}, lastErr
+				return cliproxyexecutor.Response{}, wrapExhaustedCredentialError(lastErr, len(attempted))
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
@@ -1469,9 +1531,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+					return streamErrorResult(bootstrapErr.Headers(), wrapExhaustedCredentialError(bootstrapErr.cause, len(attempted))), nil
 				}
-				return nil, lastErr
+				return nil, wrapExhaustedCredentialError(lastErr, len(attempted))
 			}
 			return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
@@ -1480,9 +1542,9 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
-					return streamErrorResult(bootstrapErr.Headers(), bootstrapErr.cause), nil
+					return streamErrorResult(bootstrapErr.Headers(), wrapExhaustedCredentialError(bootstrapErr.cause, len(attempted))), nil
 				}
-				return nil, lastErr
+				return nil, wrapExhaustedCredentialError(lastErr, len(attempted))
 			}
 			return nil, errPick
 		}
