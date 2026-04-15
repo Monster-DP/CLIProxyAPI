@@ -130,6 +130,74 @@ for (const testCase of cases) {
 	}
 }
 
+func TestManagementHTMLRequestEventSourceUsesResolvedProviderDisplayName(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not installed")
+	}
+
+	assetPath := filepath.Join("..", "..", "data", "static", ManagementFileName)
+	content, errRead := os.ReadFile(assetPath)
+	if errRead != nil {
+		t.Fatalf("read management asset: %v", errRead)
+	}
+
+	matches := regexp.MustCompile(`(?s)<script[^>]*>(.*?)</script>`).FindSubmatch(content)
+	if len(matches) < 2 {
+		t.Fatalf("management asset missing inline script")
+	}
+
+	inlineScript := string(matches[1])
+	start := strings.Index(inlineScript, "const providerDisplayHostIgnoreLabels=")
+	if start < 0 {
+		t.Fatalf("management asset missing provider display-name helpers")
+	}
+	end := strings.Index(inlineScript[start:], "const Os=\"__all__\"")
+	if end < 0 {
+		t.Fatalf("management asset missing request event source mapping section after provider helpers")
+	}
+
+	snippet := inlineScript[start : start+end]
+	nodeScript := fmt.Sprintf(`const ik=value=>typeof value==="string"?value.trim():"";
+const _i=({apiKey,prefix})=>{
+	const values = [];
+	if (apiKey) values.push("api:"+apiKey);
+	if (prefix) values.push("prefix:"+prefix);
+	return values;
+};
+%s
+const mapping = G5({
+	codexApiKeys: [{ apiKey: "codex-1", baseUrl: "https://api.asxs.top/v1" }],
+	openaiCompatibility: [{ apiKeyEntries: [{ apiKey: "openai-1" }], name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", prefix: "team-openai" }]
+});
+const cases = [
+	{ key: "api:codex-1", want: "asxs", type: "codex" },
+	{ key: "prefix:team-openai", want: "OpenRouter", type: "openai" },
+	{ key: "api:openai-1", want: "OpenRouter", type: "openai" }
+];
+for (const testCase of cases) {
+	const got = mapping.get(testCase.key);
+	if (!got || got.displayName !== testCase.want || got.type !== testCase.type) {
+		console.error(JSON.stringify({ ...testCase, got }));
+		process.exit(1);
+	}
+}
+`, snippet)
+
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "provider-source-mapping.js")
+	if errWrite := os.WriteFile(scriptPath, []byte(nodeScript), 0o600); errWrite != nil {
+		t.Fatalf("write provider source mapping script: %v", errWrite)
+	}
+
+	cmd := exec.Command("node", scriptPath)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = &stderr
+	if errRun := cmd.Run(); errRun != nil {
+		t.Fatalf("management request event source mapping invalid: %v\n%s", errRun, stderr.String())
+	}
+}
+
 func TestManagementHTMLInlineScriptParsesWithNode(t *testing.T) {
 	if _, err := exec.LookPath("node"); err != nil {
 		t.Skip("node not installed")
