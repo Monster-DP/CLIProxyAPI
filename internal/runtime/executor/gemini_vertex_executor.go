@@ -648,6 +648,9 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(ctx context.Conte
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if payload := helps.JSONPayload(line); len(payload) > 0 {
+				reporter.MarkFirstOutput()
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}
@@ -777,6 +780,9 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(ctx context.Context, auth
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if payload := helps.JSONPayload(line); len(payload) > 0 {
+				reporter.MarkFirstOutput()
+			}
 			if detail, ok := helps.ParseGeminiStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
 			}

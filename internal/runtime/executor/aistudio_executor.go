@@ -298,6 +298,9 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				if len(event.Payload) > 0 {
 					helps.AppendAPIResponseChunk(ctx, e.cfg, event.Payload)
 					filtered := helps.FilterSSEUsageMetadata(event.Payload)
+					if payload := helps.JSONPayload(filtered); len(payload) > 0 {
+						reporter.MarkFirstOutput()
+					}
 					if detail, ok := helps.ParseGeminiStreamUsage(filtered); ok {
 						reporter.Publish(ctx, detail)
 					}

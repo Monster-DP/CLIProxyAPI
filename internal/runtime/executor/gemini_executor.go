@@ -317,6 +317,7 @@ func (e *GeminiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if len(payload) == 0 {
 				continue
 			}
+			reporter.MarkFirstOutput()
 			if detail, ok := helps.ParseGeminiStreamUsage(payload); ok {
 				reporter.Publish(ctx, detail)
 			}

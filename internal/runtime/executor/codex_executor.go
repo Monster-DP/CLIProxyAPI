@@ -422,9 +422,12 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-
 			if bytes.HasPrefix(line, dataTag) {
-				data := bytes.TrimSpace(line[5:])
+				data := helps.JSONPayload(line)
+				if len(data) == 0 {
+					continue
+				}
+				reporter.MarkFirstOutput()
 				if eventErr, ok := parseCodexStreamEventError(data); ok {
 					helps.RecordAPIResponseError(ctx, e.cfg, eventErr)
 					reporter.PublishFailure(ctx)

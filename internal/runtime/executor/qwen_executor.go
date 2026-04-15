@@ -580,6 +580,9 @@ func (e *QwenExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				if payload := helps.JSONPayload(line); len(payload) > 0 {
+					reporter.MarkFirstOutput()
+				}
 				if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
 				}

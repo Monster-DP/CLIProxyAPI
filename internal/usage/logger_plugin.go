@@ -90,12 +90,14 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp            time.Time  `json:"timestamp"`
+	LatencyMs            int64      `json:"latency_ms"`
+	FirstTokenLatencyMs  int64      `json:"first_token_latency_ms"`
+	GenerationDurationMs int64      `json:"generation_duration_ms"`
+	Source               string     `json:"source"`
+	AuthIndex            string     `json:"auth_index"`
+	Tokens               TokenStats `json:"tokens"`
+	Failed               bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -198,12 +200,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
+		Timestamp:            timestamp,
+		LatencyMs:            normaliseLatency(record.Latency),
+		FirstTokenLatencyMs:  normaliseStreamingTiming(record.FirstTokenLatency),
+		GenerationDurationMs: normaliseStreamingTiming(record.GenerationDuration),
+		Source:               record.Source,
+		AuthIndex:            record.AuthIndex,
+		Tokens:               detail,
+		Failed:               failed,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -340,6 +344,8 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
 				}
+				detail.FirstTokenLatencyMs = normaliseStreamingTimingMs(detail.FirstTokenLatencyMs)
+				detail.GenerationDurationMs = normaliseStreamingTimingMs(detail.GenerationDurationMs)
 				if detail.Timestamp.IsZero() {
 					detail.Timestamp = time.Now()
 				}
@@ -448,6 +454,7 @@ func resolveSuccess(ctx context.Context) bool {
 }
 
 const httpStatusBadRequest = 400
+const unknownStreamingTimingMs int64 = -1
 
 func normaliseDetail(detail coreusage.Detail) TokenStats {
 	tokens := TokenStats{
@@ -477,10 +484,58 @@ func normaliseTokenStats(tokens TokenStats) TokenStats {
 }
 
 func normaliseLatency(latency time.Duration) int64 {
-	if latency <= 0 {
+	if latency < 0 {
+		ms := latency.Milliseconds()
+		if ms < 0 {
+			return ms
+		}
+		return unknownStreamingTimingMs
+	}
+	if latency == 0 {
 		return 0
 	}
 	return latency.Milliseconds()
+}
+
+func normaliseStreamingTiming(latency time.Duration) int64 {
+	if latency < 0 {
+		return unknownStreamingTimingMs
+	}
+	if latency == 0 {
+		return 0
+	}
+	if latency < time.Millisecond {
+		return 1
+	}
+	return latency.Milliseconds()
+}
+
+func normaliseStreamingTimingMs(value int64) int64 {
+	if value < 0 {
+		return unknownStreamingTimingMs
+	}
+	return value
+}
+
+// NormalizeLegacyZeroStreamingTimings converts legacy exported/persisted zero-value
+// streaming timings into the unknown sentinel so the management UI does not
+// treat them as real 0ms measurements.
+func NormalizeLegacyZeroStreamingTimings(snapshot StatisticsSnapshot) StatisticsSnapshot {
+	for apiName, apiSnapshot := range snapshot.APIs {
+		for modelName, modelSnapshot := range apiSnapshot.Models {
+			for idx := range modelSnapshot.Details {
+				if modelSnapshot.Details[idx].FirstTokenLatencyMs == 0 {
+					modelSnapshot.Details[idx].FirstTokenLatencyMs = unknownStreamingTimingMs
+				}
+				if modelSnapshot.Details[idx].GenerationDurationMs == 0 {
+					modelSnapshot.Details[idx].GenerationDurationMs = unknownStreamingTimingMs
+				}
+			}
+			apiSnapshot.Models[modelName] = modelSnapshot
+		}
+		snapshot.APIs[apiName] = apiSnapshot
+	}
+	return snapshot
 }
 
 func formatHour(hour int) string {

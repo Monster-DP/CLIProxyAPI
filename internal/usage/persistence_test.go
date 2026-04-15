@@ -28,10 +28,12 @@ func TestSaveSnapshotToFileAndLoadSnapshotFromFile(t *testing.T) {
 						TotalRequests: 1,
 						TotalTokens:   30,
 						Details: []RequestDetail{{
-							Timestamp: time.Date(2026, 4, 8, 8, 0, 0, 0, time.UTC),
-							LatencyMs: 1200,
-							Source:    "codex",
-							AuthIndex: "codex:0",
+							Timestamp:            time.Date(2026, 4, 8, 8, 0, 0, 0, time.UTC),
+							LatencyMs:            1200,
+							FirstTokenLatencyMs:  450,
+							GenerationDurationMs: 750,
+							Source:               "codex",
+							AuthIndex:            "codex:0",
 							Tokens: TokenStats{
 								InputTokens:  10,
 								OutputTokens: 20,
@@ -61,6 +63,13 @@ func TestSaveSnapshotToFileAndLoadSnapshotFromFile(t *testing.T) {
 	}
 	if len(got.APIs["test-key"].Models["gpt-5.4"].Details) != 1 {
 		t.Fatalf("details len = %d, want 1", len(got.APIs["test-key"].Models["gpt-5.4"].Details))
+	}
+	detail := got.APIs["test-key"].Models["gpt-5.4"].Details[0]
+	if detail.FirstTokenLatencyMs != 450 {
+		t.Fatalf("first_token_latency_ms = %d, want 450", detail.FirstTokenLatencyMs)
+	}
+	if detail.GenerationDurationMs != 750 {
+		t.Fatalf("generation_duration_ms = %d, want 750", detail.GenerationDurationMs)
 	}
 }
 
@@ -225,5 +234,55 @@ func TestRequestStatisticsDisablePersistenceStopsWritingToDisk(t *testing.T) {
 
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected persistence to stay disabled, stat err = %v", err)
+	}
+}
+
+func TestLoadSnapshotFromFileConvertsLegacyZeroStreamingTimingsToUnknownSentinel(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "usage-statistics.json")
+	data := []byte(`{
+  "total_requests": 1,
+  "success_count": 1,
+  "failure_count": 0,
+  "total_tokens": 30,
+  "apis": {
+    "test-key": {
+      "models": {
+        "gpt-5.4": {
+          "details": [
+            {
+              "timestamp": "2026-04-08T08:00:00Z",
+              "latency_ms": 1200,
+              "first_token_latency_ms": 0,
+              "generation_duration_ms": 0,
+              "tokens": {
+                "input_tokens": 10,
+                "output_tokens": 20,
+                "total_tokens": 30
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("os.WriteFile returned error: %v", err)
+	}
+
+	snapshot, err := LoadSnapshotFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadSnapshotFromFile returned error: %v", err)
+	}
+
+	detail := snapshot.APIs["test-key"].Models["gpt-5.4"].Details[0]
+	if detail.FirstTokenLatencyMs >= 0 {
+		t.Fatalf("first_token_latency_ms = %d, want negative unknown sentinel", detail.FirstTokenLatencyMs)
+	}
+	if detail.GenerationDurationMs >= 0 {
+		t.Fatalf("generation_duration_ms = %d, want negative unknown sentinel", detail.GenerationDurationMs)
 	}
 }

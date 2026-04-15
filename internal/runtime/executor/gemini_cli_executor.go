@@ -403,6 +403,9 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				for scanner.Scan() {
 					line := scanner.Bytes()
 					helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+					if payload := helps.JSONPayload(line); len(payload) > 0 {
+						reporter.MarkFirstOutput()
+					}
 					if detail, ok := helps.ParseGeminiCLIStreamUsage(line); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -434,6 +437,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 				return
 			}
 			helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+			reporter.MarkFirstOutput()
 			reporter.Publish(ctx, helps.ParseGeminiCLIUsage(data))
 			var param any
 			segments := sdktranslator.TranslateStream(respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, data, &param)

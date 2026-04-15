@@ -62,3 +62,109 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
 	}
 }
+
+func TestUsageReporterBuildRecordIncludesStreamingTimings(t *testing.T) {
+	base := time.Date(2026, 4, 14, 20, 0, 0, 0, time.UTC)
+	reporter := &UsageReporter{
+		provider:      "codex",
+		model:         "gpt-5.4",
+		requestedAt:   base,
+		firstOutputAt: base.Add(1200 * time.Millisecond),
+		now: func() time.Time {
+			return base.Add(4700 * time.Millisecond)
+		},
+	}
+
+	record := reporter.buildRecord(usage.Detail{OutputTokens: 70, TotalTokens: 70}, false)
+	if record.FirstTokenLatency != 1200*time.Millisecond {
+		t.Fatalf("first token latency = %v, want %v", record.FirstTokenLatency, 1200*time.Millisecond)
+	}
+	if record.GenerationDuration != 3500*time.Millisecond {
+		t.Fatalf("generation duration = %v, want %v", record.GenerationDuration, 3500*time.Millisecond)
+	}
+}
+
+func TestUsageReporterBuildRecordUsesUnknownTimingSentinelWhenStreamingStartIsMissing(t *testing.T) {
+	base := time.Date(2026, 4, 14, 20, 0, 0, 0, time.UTC)
+	reporter := &UsageReporter{
+		provider:    "codex",
+		model:       "gpt-5.4",
+		requestedAt: base,
+		now: func() time.Time {
+			return base.Add(4700 * time.Millisecond)
+		},
+	}
+
+	record := reporter.buildRecord(usage.Detail{OutputTokens: 70, TotalTokens: 70}, false)
+	if record.FirstTokenLatency >= 0 {
+		t.Fatalf("first token latency = %v, want negative unknown sentinel", record.FirstTokenLatency)
+	}
+	if record.GenerationDuration >= 0 {
+		t.Fatalf("generation duration = %v, want negative unknown sentinel", record.GenerationDuration)
+	}
+}
+
+func TestUsageReporterBuildRecordUsesNegativeSentinelForUnknownStreamingTimings(t *testing.T) {
+	base := time.Date(2026, 4, 14, 20, 0, 0, 0, time.UTC)
+	reporter := &UsageReporter{
+		provider:    "codex",
+		model:       "gpt-5.4",
+		requestedAt: base,
+		now: func() time.Time {
+			return base.Add(4700 * time.Millisecond)
+		},
+	}
+
+	record := reporter.buildRecord(usage.Detail{OutputTokens: 70, TotalTokens: 70}, false)
+	if record.FirstTokenLatency >= 0 {
+		t.Fatalf("first token latency = %v, want negative sentinel for unknown timing", record.FirstTokenLatency)
+	}
+	if record.GenerationDuration >= 0 {
+		t.Fatalf("generation duration = %v, want negative sentinel for unknown timing", record.GenerationDuration)
+	}
+}
+
+func TestCodexStreamEventHasVisibleOutput(t *testing.T) {
+	if !CodexStreamEventHasVisibleOutput([]byte(`{"type":"response.output_text.delta","delta":"hello"}`)) {
+		t.Fatal("expected codex delta event to count as visible output")
+	}
+	if CodexStreamEventHasVisibleOutput([]byte(`{"type":"response.completed","response":{"status":"completed"}}`)) {
+		t.Fatal("response.completed should not count as visible output")
+	}
+	if CodexStreamEventHasVisibleOutput([]byte(`{"type":"response.output_item.done","item":{"role":"assistant","content":[{"type":"tool_call","name":"lookup"}]}}`)) {
+		t.Fatal("tool call content should not count as visible output")
+	}
+}
+
+func TestOpenAIStreamEventHasVisibleOutput(t *testing.T) {
+	if !OpenAIStreamEventHasVisibleOutput([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}`)) {
+		t.Fatal("expected chat delta content to count as visible output")
+	}
+	if OpenAIStreamEventHasVisibleOutput([]byte(`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":3}}`)) {
+		t.Fatal("usage-only chunk should not count as visible output")
+	}
+}
+
+func TestClaudeStreamEventHasVisibleOutput(t *testing.T) {
+	if !ClaudeStreamEventHasVisibleOutput([]byte(`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`)) {
+		t.Fatal("expected claude text delta to count as visible output")
+	}
+	if ClaudeStreamEventHasVisibleOutput([]byte(`data: {"type":"message_delta","usage":{"output_tokens":12}}`)) {
+		t.Fatal("claude usage chunk should not count as visible output")
+	}
+}
+
+func TestGeminiStreamPayloadHasVisibleOutput(t *testing.T) {
+	if !GeminiStreamPayloadHasVisibleOutput([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}`)) {
+		t.Fatal("expected gemini text part to count as visible output")
+	}
+	if !GeminiStreamPayloadHasVisibleOutput([]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]}}]}}`)) {
+		t.Fatal("expected gemini-cli response text part to count as visible output")
+	}
+	if GeminiStreamPayloadHasVisibleOutput([]byte(`data: {"usageMetadata":{"totalTokenCount":12}}`)) {
+		t.Fatal("usage-only gemini chunk should not count as visible output")
+	}
+	if GeminiStreamPayloadHasVisibleOutput([]byte(`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup_weather"}}]}}]}`)) {
+		t.Fatal("function call part should not count as visible output")
+	}
+}

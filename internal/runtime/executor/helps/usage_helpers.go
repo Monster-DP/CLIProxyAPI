@@ -15,15 +15,20 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const unknownTimingDuration = -1 * time.Millisecond
+
 type UsageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider        string
+	model           string
+	authID          string
+	authIndex       string
+	apiKey          string
+	source          string
+	requestedAt     time.Time
+	firstOutputAt   time.Time
+	firstOutputOnce sync.Once
+	once            sync.Once
+	now             func() time.Time
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -34,6 +39,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		requestedAt: time.Now(),
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
+		now:         time.Now,
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -44,6 +50,15 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
 	r.publishWithOutcome(ctx, detail, false)
+}
+
+func (r *UsageReporter) MarkFirstOutput() {
+	if r == nil {
+		return
+	}
+	r.firstOutputOnce.Do(func() {
+		r.firstOutputAt = r.currentTime()
+	})
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context) {
@@ -92,16 +107,18 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       r.model,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Detail:      detail,
+		Provider:           r.provider,
+		Model:              r.model,
+		Source:             r.source,
+		APIKey:             r.apiKey,
+		AuthID:             r.authID,
+		AuthIndex:          r.authIndex,
+		RequestedAt:        r.requestedAt,
+		Latency:            r.latency(),
+		FirstTokenLatency:  r.firstTokenLatency(),
+		GenerationDuration: r.generationDuration(),
+		Failed:             failed,
+		Detail:             detail,
 	}
 }
 
@@ -109,11 +126,40 @@ func (r *UsageReporter) latency() time.Duration {
 	if r == nil || r.requestedAt.IsZero() {
 		return 0
 	}
-	latency := time.Since(r.requestedAt)
+	latency := r.currentTime().Sub(r.requestedAt)
 	if latency < 0 {
 		return 0
 	}
 	return latency
+}
+
+func (r *UsageReporter) firstTokenLatency() time.Duration {
+	if r == nil || r.requestedAt.IsZero() || r.firstOutputAt.IsZero() {
+		return unknownTimingDuration
+	}
+	latency := r.firstOutputAt.Sub(r.requestedAt)
+	if latency < 0 {
+		return unknownTimingDuration
+	}
+	return latency
+}
+
+func (r *UsageReporter) generationDuration() time.Duration {
+	if r == nil || r.firstOutputAt.IsZero() {
+		return unknownTimingDuration
+	}
+	duration := r.currentTime().Sub(r.firstOutputAt)
+	if duration < 0 {
+		return unknownTimingDuration
+	}
+	return duration
+}
+
+func (r *UsageReporter) currentTime() time.Time {
+	if r == nil || r.now == nil {
+		return time.Now()
+	}
+	return r.now()
 }
 
 func APIKeyFromContext(ctx context.Context) string {
@@ -396,6 +442,110 @@ func ParseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	return parseGeminiFamilyUsageDetail(node), true
+}
+
+func CodexStreamEventHasVisibleOutput(line []byte) bool {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+
+	eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+	switch eventType {
+	case "response.output_text.delta", "response.output_text.done":
+		return hasTrimmedValue(gjson.GetBytes(payload, "delta")) || hasTrimmedValue(gjson.GetBytes(payload, "text"))
+	case "response.output_item.done":
+		if !strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "item.role").String()), "assistant") {
+			return false
+		}
+		return contentArrayHasVisibleText(gjson.GetBytes(payload, "item.content"))
+	default:
+		return false
+	}
+}
+
+func OpenAIStreamEventHasVisibleOutput(line []byte) bool {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+
+	choices := gjson.GetBytes(payload, "choices")
+	if !choices.IsArray() {
+		return false
+	}
+	for _, choice := range choices.Array() {
+		delta := choice.Get("delta")
+		if !delta.Exists() {
+			continue
+		}
+		if hasTrimmedValue(delta.Get("content")) {
+			return true
+		}
+		if contentArrayHasVisibleText(delta.Get("content")) {
+			return true
+		}
+	}
+	return false
+}
+
+func ClaudeStreamEventHasVisibleOutput(line []byte) bool {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "content_block_delta" {
+		return false
+	}
+	return hasTrimmedValue(gjson.GetBytes(payload, "delta.text"))
+}
+
+func GeminiStreamPayloadHasVisibleOutput(line []byte) bool {
+	payload := jsonPayload(line)
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return false
+	}
+	if candidatePartsHaveVisibleText(gjson.GetBytes(payload, "candidates")) {
+		return true
+	}
+	return candidatePartsHaveVisibleText(gjson.GetBytes(payload, "response.candidates"))
+}
+
+func candidatePartsHaveVisibleText(candidates gjson.Result) bool {
+	if !candidates.IsArray() {
+		return false
+	}
+	for _, candidate := range candidates.Array() {
+		if contentArrayHasVisibleText(candidate.Get("content.parts")) {
+			return true
+		}
+	}
+	return false
+}
+
+func contentArrayHasVisibleText(content gjson.Result) bool {
+	if !content.IsArray() {
+		return false
+	}
+	for _, part := range content.Array() {
+		if part.Type == gjson.String && hasTrimmedValue(part) {
+			return true
+		}
+		if hasTrimmedValue(part.Get("text")) {
+			return true
+		}
+		if hasTrimmedValue(part.Get("refusal")) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasTrimmedValue(value gjson.Result) bool {
+	if !value.Exists() {
+		return false
+	}
+	return strings.TrimSpace(value.String()) != ""
 }
 
 var stopChunkWithoutUsage sync.Map

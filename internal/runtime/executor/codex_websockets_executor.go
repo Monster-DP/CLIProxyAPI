@@ -594,7 +594,11 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			}
 
 			payload = normalizeCodexWebsocketCompletion(payload)
+			reporter.MarkFirstOutput()
 			eventType := gjson.GetBytes(payload, "type").String()
+			if helps.CodexStreamEventHasVisibleOutput(payload) {
+				reporter.MarkFirstOutput()
+			}
 			if eventType == "response.completed" || eventType == "response.done" {
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
 					reporter.Publish(ctx, detail)

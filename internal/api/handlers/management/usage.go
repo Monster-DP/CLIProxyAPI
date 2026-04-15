@@ -20,6 +20,8 @@ type usageImportPayload struct {
 	Usage   usage.StatisticsSnapshot `json:"usage"`
 }
 
+const currentUsageExportVersion = 2
+
 // GetUsageStatistics returns the in-memory request statistics snapshot.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
@@ -39,7 +41,7 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 		snapshot = h.usageStats.Snapshot()
 	}
 	c.JSON(http.StatusOK, usageExportPayload{
-		Version:    1,
+		Version:    currentUsageExportVersion,
 		ExportedAt: time.Now().UTC(),
 		Usage:      snapshot,
 	})
@@ -63,9 +65,12 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	if payload.Version != 0 && payload.Version != 1 {
+	if payload.Version != 0 && payload.Version != 1 && payload.Version != currentUsageExportVersion {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported version"})
 		return
+	}
+	if payload.Version <= 1 {
+		payload.Usage = usage.NormalizeLegacyZeroStreamingTimings(payload.Usage)
 	}
 
 	result := h.usageStats.MergeSnapshot(payload.Usage)

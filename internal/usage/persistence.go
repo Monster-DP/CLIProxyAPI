@@ -101,6 +101,7 @@ func LoadSnapshotFromFile(path string) (StatisticsSnapshot, error) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return StatisticsSnapshot{}, fmt.Errorf("unmarshal usage statistics snapshot: %w", err)
 	}
+	snapshot = NormalizeLegacyZeroStreamingTimings(snapshot)
 
 	return snapshot, nil
 }
