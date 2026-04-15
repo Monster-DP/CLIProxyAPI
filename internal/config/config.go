@@ -364,6 +364,9 @@ type ClaudeKey struct {
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
+	// DisplayName optionally overrides the provider label shown in management views and usage stats.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
 	// BaseURL is the base URL for the Claude API endpoint.
 	// If empty, the default Claude API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
@@ -417,6 +420,9 @@ type CodexKey struct {
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
 
+	// DisplayName optionally overrides the provider label shown in management views and usage stats.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
+
 	// BaseURL is the base URL for the Codex API endpoint.
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
@@ -464,6 +470,9 @@ type GeminiKey struct {
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-3-pro-preview").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
+
+	// DisplayName optionally overrides the provider label shown in management views and usage stats.
+	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
 	// BaseURL optionally overrides the Gemini API endpoint.
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
@@ -856,6 +865,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 	for i := range cfg.CodexKey {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.DisplayName = NormalizeDisplayName(e.DisplayName)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
@@ -875,6 +885,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.DisplayName = NormalizeDisplayName(entry.DisplayName)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
@@ -896,6 +907,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 			continue
 		}
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.DisplayName = NormalizeDisplayName(entry.DisplayName)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
@@ -920,6 +932,11 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
+}
+
+// NormalizeDisplayName trims display-only provider labels before they are persisted.
+func NormalizeDisplayName(displayName string) string {
+	return strings.TrimSpace(displayName)
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.

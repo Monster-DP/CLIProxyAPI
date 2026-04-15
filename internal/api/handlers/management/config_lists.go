@@ -147,6 +147,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	type geminiKeyPatch struct {
 		APIKey         *string            `json:"api-key"`
 		Prefix         *string            `json:"prefix"`
+		DisplayName    *string            `json:"display-name"`
 		BaseURL        *string            `json:"base-url"`
 		ProxyURL       *string            `json:"proxy-url"`
 		Headers        *map[string]string `json:"headers"`
@@ -194,6 +195,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = config.NormalizeDisplayName(*body.Value.DisplayName)
 	}
 	if body.Value.BaseURL != nil {
 		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
@@ -300,6 +304,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	type claudeKeyPatch struct {
 		APIKey         *string               `json:"api-key"`
 		Prefix         *string               `json:"prefix"`
+		DisplayName    *string               `json:"display-name"`
 		BaseURL        *string               `json:"base-url"`
 		ProxyURL       *string               `json:"proxy-url"`
 		Models         *[]config.ClaudeModel `json:"models"`
@@ -339,6 +344,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = config.NormalizeDisplayName(*body.Value.DisplayName)
 	}
 	if body.Value.BaseURL != nil {
 		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
@@ -574,6 +582,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	type vertexCompatPatch struct {
 		APIKey         *string                     `json:"api-key"`
 		Prefix         *string                     `json:"prefix"`
+		DisplayName    *string                     `json:"display-name"`
 		BaseURL        *string                     `json:"base-url"`
 		ProxyURL       *string                     `json:"proxy-url"`
 		Headers        *map[string]string          `json:"headers"`
@@ -622,6 +631,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = config.NormalizeDisplayName(*body.Value.DisplayName)
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -923,6 +935,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	type codexKeyPatch struct {
 		APIKey         *string              `json:"api-key"`
 		Prefix         *string              `json:"prefix"`
+		DisplayName    *string              `json:"display-name"`
 		BaseURL        *string              `json:"base-url"`
 		ProxyURL       *string              `json:"proxy-url"`
 		Models         *[]config.CodexModel `json:"models"`
@@ -962,6 +975,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.Prefix != nil {
 		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.DisplayName != nil {
+		entry.DisplayName = config.NormalizeDisplayName(*body.Value.DisplayName)
 	}
 	if body.Value.BaseURL != nil {
 		trimmed := strings.TrimSpace(*body.Value.BaseURL)
@@ -1080,6 +1096,7 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 		return
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.DisplayName = config.NormalizeDisplayName(entry.DisplayName)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
@@ -1106,6 +1123,7 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.DisplayName = config.NormalizeDisplayName(entry.DisplayName)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
@@ -1132,6 +1150,7 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	}
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.DisplayName = config.NormalizeDisplayName(entry.DisplayName)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
