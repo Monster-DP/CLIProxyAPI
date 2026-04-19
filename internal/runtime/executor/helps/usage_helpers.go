@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -18,28 +19,38 @@ import (
 const unknownTimingDuration = -1 * time.Millisecond
 
 type UsageReporter struct {
-	provider        string
-	model           string
-	authID          string
-	authIndex       string
-	apiKey          string
-	source          string
-	requestedAt     time.Time
-	firstOutputAt   time.Time
-	firstOutputOnce sync.Once
-	once            sync.Once
-	now             func() time.Time
+	provider            string
+	model               string
+	authID              string
+	authIndex           string
+	apiKey              string
+	source              string
+	providerRequestedAt time.Time
+	requestedAt         time.Time
+	firstOutputAt       time.Time
+	firstOutputOnce     sync.Once
+	once                sync.Once
+	now                 func() time.Time
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
 	apiKey := APIKeyFromContext(ctx)
+	requestedAt := time.Now()
+	if startedAt, ok := requestStartFromContext(ctx); ok {
+		requestedAt = startedAt
+	}
+	providerRequestedAt := requestedAt
+	if startedAt, ok := cliproxyexecutor.ProviderFirstByteStart(ctx); ok {
+		providerRequestedAt = startedAt
+	}
 	reporter := &UsageReporter{
-		provider:    provider,
-		model:       model,
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
-		now:         time.Now,
+		provider:            provider,
+		model:               model,
+		providerRequestedAt: providerRequestedAt,
+		requestedAt:         requestedAt,
+		apiKey:              apiKey,
+		source:              resolveUsageSource(auth, apiKey),
+		now:                 time.Now,
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -107,18 +118,19 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		return usage.Record{Detail: detail, Failed: failed}
 	}
 	return usage.Record{
-		Provider:           r.provider,
-		Model:              r.model,
-		Source:             r.source,
-		APIKey:             r.apiKey,
-		AuthID:             r.authID,
-		AuthIndex:          r.authIndex,
-		RequestedAt:        r.requestedAt,
-		Latency:            r.latency(),
-		FirstTokenLatency:  r.firstTokenLatency(),
-		GenerationDuration: r.generationDuration(),
-		Failed:             failed,
-		Detail:             detail,
+		Provider:                  r.provider,
+		Model:                     r.model,
+		Source:                    r.source,
+		APIKey:                    r.apiKey,
+		AuthID:                    r.authID,
+		AuthIndex:                 r.authIndex,
+		RequestedAt:               r.requestedAt,
+		Latency:                   r.latency(),
+		ProviderFirstTokenLatency: r.providerFirstTokenLatency(),
+		FirstTokenLatency:         r.firstTokenLatency(),
+		GenerationDuration:        r.generationDuration(),
+		Failed:                    failed,
+		Detail:                    detail,
 	}
 }
 
@@ -144,6 +156,17 @@ func (r *UsageReporter) firstTokenLatency() time.Duration {
 	return latency
 }
 
+func (r *UsageReporter) providerFirstTokenLatency() time.Duration {
+	if r == nil || r.providerRequestedAt.IsZero() || r.firstOutputAt.IsZero() {
+		return unknownTimingDuration
+	}
+	latency := r.firstOutputAt.Sub(r.providerRequestedAt)
+	if latency < 0 {
+		return unknownTimingDuration
+	}
+	return latency
+}
+
 func (r *UsageReporter) generationDuration() time.Duration {
 	if r == nil || r.firstOutputAt.IsZero() {
 		return unknownTimingDuration
@@ -160,6 +183,20 @@ func (r *UsageReporter) currentTime() time.Time {
 		return time.Now()
 	}
 	return r.now()
+}
+
+func requestStartFromContext(ctx context.Context) (time.Time, bool) {
+	if startedAt, ok := cliproxyexecutor.RequestStart(ctx); ok {
+		return startedAt, true
+	}
+	if ctx == nil {
+		return time.Time{}, false
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return time.Time{}, false
+	}
+	return cliproxyexecutor.RequestStart(ginCtx.Request.Context())
 }
 
 func APIKeyFromContext(ctx context.Context) string {

@@ -792,19 +792,73 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 	}
 }
 
-func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk, firstByteTimeout time.Duration) ([]cliproxyexecutor.StreamChunk, bool, error) {
+func newStreamFirstByteTimeoutError() *Error {
+	return &Error{
+		Code:       "stream_first_byte_timeout",
+		Message:    "upstream stream timed out before first payload",
+		Retryable:  true,
+		HTTPStatus: http.StatusRequestTimeout,
+	}
+}
+
+type streamFirstByteAttempt struct {
+	timer  *time.Timer
+	cancel context.CancelCauseFunc
+}
+
+func newStreamFirstByteAttemptContext(ctx context.Context, timeout time.Duration) (context.Context, *streamFirstByteAttempt) {
+	if timeout <= 0 {
+		return ctx, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	execCtx, cancel := context.WithCancelCause(ctx)
+	attempt := &streamFirstByteAttempt{cancel: cancel}
+	attempt.timer = time.AfterFunc(timeout, func() {
+		cancel(newStreamFirstByteTimeoutError())
+	})
+	return execCtx, attempt
+}
+
+func (a *streamFirstByteAttempt) stopTimer() {
+	if a == nil || a.timer == nil {
+		return
+	}
+	a.timer.Stop()
+}
+
+func (a *streamFirstByteAttempt) release() {
+	if a == nil {
+		return
+	}
+	a.stopTimer()
+	if a.cancel != nil {
+		a.cancel(context.Canceled)
+	}
+}
+
+func streamFirstByteTimeoutCause(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	cause := context.Cause(ctx)
+	if cause == nil {
+		return nil
+	}
+	var authErr *Error
+	if errors.As(cause, &authErr) && authErr != nil && authErr.Code == "stream_first_byte_timeout" {
+		return authErr
+	}
+	return nil
+}
+
+func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) ([]cliproxyexecutor.StreamChunk, bool, error) {
 	if ch == nil {
 		return nil, true, nil
 	}
 	buffered := make([]cliproxyexecutor.StreamChunk, 0, 1)
-	var timeoutCh <-chan time.Time
-	var timeoutTimer *time.Timer
 	var ctxDone <-chan struct{}
-	if firstByteTimeout > 0 {
-		timeoutTimer = time.NewTimer(firstByteTimeout)
-		timeoutCh = timeoutTimer.C
-		defer timeoutTimer.Stop()
-	}
 	if ctx != nil {
 		ctxDone = ctx.Done()
 	}
@@ -813,17 +867,13 @@ func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamC
 			chunk cliproxyexecutor.StreamChunk
 			ok    bool
 		)
-		if ctx != nil || timeoutCh != nil {
+		if ctx != nil {
 			select {
 			case <-ctxDone:
-				return nil, false, ctx.Err()
-			case <-timeoutCh:
-				return nil, false, &Error{
-					Code:       "stream_first_byte_timeout",
-					Message:    "upstream stream timed out before first payload",
-					Retryable:  true,
-					HTTPStatus: http.StatusRequestTimeout,
+				if cause := context.Cause(ctx); cause != nil {
+					return nil, false, cause
 				}
+				return nil, false, ctx.Err()
 			case chunk, ok = <-ch:
 			}
 		} else {
@@ -904,22 +954,23 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		resultModel := m.stateModelForExecution(auth, routeModel, execModel, pooled)
 		execReq := req
 		execReq.Model = execModel
-		execCtx := ctx
-		var cancel context.CancelFunc
-		if firstByteTimeout > 0 {
-			execCtx, cancel = context.WithCancel(ctx)
+		execCtx := cliproxyexecutor.WithProviderFirstByteStart(ctx, time.Now())
+		execCtx, firstByteAttempt := newStreamFirstByteAttemptContext(execCtx, firstByteTimeout)
+		cleanup := func() {
+			if firstByteAttempt != nil {
+				firstByteAttempt.release()
+			}
 		}
 		streamResult, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
+		if timeoutErr := streamFirstByteTimeoutCause(execCtx); timeoutErr != nil {
+			errStream = timeoutErr
+		}
 		if errStream != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				if cancel != nil {
-					cancel()
-				}
+				cleanup()
 				return nil, errCtx
 			}
-			if cancel != nil {
-				cancel()
-			}
+			cleanup()
 			rerr := &Error{Message: errStream.Error()}
 			if se, ok := errors.AsType[cliproxyexecutor.StatusError](errStream); ok && se != nil {
 				rerr.HTTPStatus = se.StatusCode()
@@ -934,18 +985,14 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			continue
 		}
 
-		buffered, closed, bootstrapErr := readStreamBootstrap(execCtx, streamResult.Chunks, firstByteTimeout)
+		buffered, closed, bootstrapErr := readStreamBootstrap(execCtx, streamResult.Chunks)
 		if bootstrapErr != nil {
 			if errCtx := ctx.Err(); errCtx != nil {
-				if cancel != nil {
-					cancel()
-				}
+				cleanup()
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
-			if cancel != nil {
-				cancel()
-			}
+			cleanup()
 			if isRequestInvalidError(bootstrapErr) {
 				rerr := &Error{Message: bootstrapErr.Error()}
 				if se, ok := errors.AsType[cliproxyexecutor.StatusError](bootstrapErr); ok && se != nil {
@@ -981,9 +1028,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 
 		if closed && len(buffered) == 0 {
-			if cancel != nil {
-				cancel()
-			}
+			cleanup()
 			emptyErr := &Error{Code: "empty_stream", Message: "upstream stream closed before first payload", Retryable: true}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: emptyErr}
 			m.MarkResult(ctx, result)
@@ -1000,7 +1045,10 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			close(closedCh)
 			remaining = closedCh
 		}
-		return m.wrapStreamResult(execCtx, cancel, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
+		if firstByteAttempt != nil {
+			firstByteAttempt.stopTimer()
+		}
+		return m.wrapStreamResult(execCtx, cleanup, auth.Clone(), provider, resultModel, streamResult.Headers, buffered, remaining), nil
 	}
 	if lastErr == nil {
 		lastErr = &Error{Code: "auth_not_found", Message: "no upstream model available"}

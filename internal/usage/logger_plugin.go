@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
@@ -60,11 +62,13 @@ func StatisticsEnabled() bool { return statisticsEnabled.Load() }
 type RequestStatistics struct {
 	mu sync.RWMutex
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
-	persistence   *statisticsPersistence
+	totalRequests  int64
+	successCount   int64
+	failureCount   int64
+	totalTokens    int64
+	persistence    *statisticsPersistence
+	eventArchive   *EventArchive
+	persistenceGen uint64
 
 	apis map[string]*apiStats
 
@@ -90,14 +94,15 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp            time.Time  `json:"timestamp"`
-	LatencyMs            int64      `json:"latency_ms"`
-	FirstTokenLatencyMs  int64      `json:"first_token_latency_ms"`
-	GenerationDurationMs int64      `json:"generation_duration_ms"`
-	Source               string     `json:"source"`
-	AuthIndex            string     `json:"auth_index"`
-	Tokens               TokenStats `json:"tokens"`
-	Failed               bool       `json:"failed"`
+	Timestamp                   time.Time  `json:"timestamp"`
+	LatencyMs                   int64      `json:"latency_ms"`
+	ProviderFirstTokenLatencyMs int64      `json:"provider_first_token_latency_ms"`
+	FirstTokenLatencyMs         int64      `json:"first_token_latency_ms"`
+	GenerationDurationMs        int64      `json:"generation_duration_ms"`
+	Source                      string     `json:"source"`
+	AuthIndex                   string     `json:"auth_index"`
+	Tokens                      TokenStats `json:"tokens"`
+	Failed                      bool       `json:"failed"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -183,6 +188,17 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
+	requestDetail := RequestDetail{
+		Timestamp:                   timestamp,
+		LatencyMs:                   normaliseLatency(record.Latency),
+		ProviderFirstTokenLatencyMs: normaliseStreamingTiming(record.ProviderFirstTokenLatency),
+		FirstTokenLatencyMs:         normaliseStreamingTiming(record.FirstTokenLatency),
+		GenerationDurationMs:        normaliseStreamingTiming(record.GenerationDuration),
+		Source:                      record.Source,
+		AuthIndex:                   record.AuthIndex,
+		Tokens:                      detail,
+		Failed:                      failed,
+	}
 
 	s.mu.Lock()
 
@@ -199,16 +215,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp:            timestamp,
-		LatencyMs:            normaliseLatency(record.Latency),
-		FirstTokenLatencyMs:  normaliseStreamingTiming(record.FirstTokenLatency),
-		GenerationDurationMs: normaliseStreamingTiming(record.GenerationDuration),
-		Source:               record.Source,
-		AuthIndex:            record.AuthIndex,
-		Tokens:               detail,
-		Failed:               failed,
-	})
+	s.updateAPIStats(stats, modelName, requestDetail, s.eventArchive == nil)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
@@ -216,11 +223,29 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.tokensByHour[hourKey] += totalTokens
 
 	persistence := s.persistence
+	eventArchive := s.eventArchive
 	s.mu.Unlock()
+	if eventArchive != nil {
+		if err := eventArchive.Append(UsageEvent{
+			APIKey:                      statsKey,
+			Model:                       modelName,
+			Timestamp:                   requestDetail.Timestamp,
+			LatencyMs:                   requestDetail.LatencyMs,
+			ProviderFirstTokenLatencyMs: requestDetail.ProviderFirstTokenLatencyMs,
+			FirstTokenLatencyMs:         requestDetail.FirstTokenLatencyMs,
+			GenerationDurationMs:        requestDetail.GenerationDurationMs,
+			Source:                      requestDetail.Source,
+			AuthIndex:                   requestDetail.AuthIndex,
+			Tokens:                      requestDetail.Tokens,
+			Failed:                      requestDetail.Failed,
+		}); err != nil {
+			log.WithError(err).Warn("failed to append usage event to archive")
+		}
+	}
 	s.schedulePersistenceSave(persistence)
 }
 
-func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
+func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail, keepDetails bool) {
 	stats.TotalRequests++
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
@@ -230,11 +255,69 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 	}
 	modelStatsValue.TotalRequests++
 	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
-	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	if keepDetails {
+		modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	}
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
+	if s == nil {
+		return StatisticsSnapshot{}
+	}
+
+	s.mu.RLock()
+	archive := s.eventArchive
+	s.mu.RUnlock()
+	if archive == nil {
+		return s.snapshot(true)
+	}
+
+	return s.snapshotWithArchiveDetails(archive)
+}
+
+// SummarySnapshot returns only the aggregated counters without embedding full request history details.
+func (s *RequestStatistics) SummarySnapshot() StatisticsSnapshot {
+	return s.snapshot(false)
+}
+
+func (s *RequestStatistics) snapshotWithArchiveDetails(archive *EventArchive) StatisticsSnapshot {
+	snapshot := s.snapshot(false)
+	if archive == nil {
+		return snapshot
+	}
+
+	events, err := archive.readMatchingEvents(EventQuery{})
+	if err != nil {
+		log.WithError(err).Warn("failed to rebuild full usage snapshot from archive")
+		return snapshot
+	}
+
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].Timestamp.Equal(events[j].Timestamp) {
+			return events[i].EventCursor < events[j].EventCursor
+		}
+		return events[i].Timestamp.Before(events[j].Timestamp)
+	})
+
+	for _, event := range events {
+		apiSnapshot, ok := snapshot.APIs[event.APIKey]
+		if !ok {
+			apiSnapshot = APISnapshot{Models: make(map[string]ModelSnapshot)}
+		} else if apiSnapshot.Models == nil {
+			apiSnapshot.Models = make(map[string]ModelSnapshot)
+		}
+
+		modelSnapshot := apiSnapshot.Models[event.Model]
+		modelSnapshot.Details = append(modelSnapshot.Details, requestDetailFromUsageEvent(event))
+		apiSnapshot.Models[event.Model] = modelSnapshot
+		snapshot.APIs[event.APIKey] = apiSnapshot
+	}
+
+	return snapshot
+}
+
+func (s *RequestStatistics) snapshot(includeDetails bool) StatisticsSnapshot {
 	result := StatisticsSnapshot{}
 	if s == nil {
 		return result
@@ -256,8 +339,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
+			var requestDetails []RequestDetail
+			if includeDetails {
+				requestDetails = make([]RequestDetail, len(modelStatsValue.Details))
+				copy(requestDetails, modelStatsValue.Details)
+			}
 			apiSnapshot.Models[modelName] = ModelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
@@ -292,6 +378,34 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	return result
 }
 
+func requestDetailFromUsageEvent(event UsageEvent) RequestDetail {
+	return RequestDetail{
+		Timestamp:                   event.Timestamp,
+		LatencyMs:                   event.LatencyMs,
+		ProviderFirstTokenLatencyMs: event.ProviderFirstTokenLatencyMs,
+		FirstTokenLatencyMs:         event.FirstTokenLatencyMs,
+		GenerationDurationMs:        event.GenerationDurationMs,
+		Source:                      event.Source,
+		AuthIndex:                   event.AuthIndex,
+		Tokens:                      event.Tokens,
+		Failed:                      event.Failed,
+	}
+}
+
+func populateDedupCountsFromArchive(counts map[string]int, archive *EventArchive) {
+	if archive == nil {
+		return
+	}
+
+	if err := archive.scanMatchingEvents(EventQuery{}, func(event UsageEvent) error {
+		counts[dedupKey(event.APIKey, event.Model, requestDetailFromUsageEvent(event))]++
+		return nil
+	}); err != nil {
+		log.WithError(err).Warn("failed to load archived usage events for import deduplication")
+		return
+	}
+}
+
 type MergeResult struct {
 	Added   int64 `json:"added"`
 	Skipped int64 `json:"skipped"`
@@ -307,7 +421,8 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 
 	s.mu.Lock()
 
-	seen := make(map[string]struct{})
+	existingCounts := make(map[string]int)
+	populateDedupCountsFromArchive(existingCounts, s.eventArchive)
 	for apiName, stats := range s.apis {
 		if stats == nil {
 			continue
@@ -317,7 +432,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				continue
 			}
 			for _, detail := range modelStatsValue.Details {
-				seen[dedupKey(apiName, modelName, detail)] = struct{}{}
+				existingCounts[dedupKey(apiName, modelName, detail)]++
 			}
 		}
 	}
@@ -344,17 +459,18 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				if detail.LatencyMs < 0 {
 					detail.LatencyMs = 0
 				}
+				detail.ProviderFirstTokenLatencyMs = normaliseStreamingTimingMs(detail.ProviderFirstTokenLatencyMs)
 				detail.FirstTokenLatencyMs = normaliseStreamingTimingMs(detail.FirstTokenLatencyMs)
 				detail.GenerationDurationMs = normaliseStreamingTimingMs(detail.GenerationDurationMs)
 				if detail.Timestamp.IsZero() {
 					detail.Timestamp = time.Now()
 				}
 				key := dedupKey(apiName, modelName, detail)
-				if _, exists := seen[key]; exists {
+				if existingCounts[key] > 0 {
+					existingCounts[key]--
 					result.Skipped++
 					continue
 				}
-				seen[key] = struct{}{}
 				s.recordImported(apiName, modelName, stats, detail)
 				result.Added++
 			}
@@ -383,7 +499,24 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	}
 	s.totalTokens += totalTokens
 
-	s.updateAPIStats(stats, modelName, detail)
+	s.updateAPIStats(stats, modelName, detail, s.eventArchive == nil)
+	if s.eventArchive != nil {
+		if err := s.eventArchive.Append(UsageEvent{
+			APIKey:                      apiName,
+			Model:                       modelName,
+			Timestamp:                   detail.Timestamp,
+			LatencyMs:                   detail.LatencyMs,
+			ProviderFirstTokenLatencyMs: detail.ProviderFirstTokenLatencyMs,
+			FirstTokenLatencyMs:         detail.FirstTokenLatencyMs,
+			GenerationDurationMs:        detail.GenerationDurationMs,
+			Source:                      detail.Source,
+			AuthIndex:                   detail.AuthIndex,
+			Tokens:                      detail.Tokens,
+			Failed:                      detail.Failed,
+		}); err != nil {
+			log.WithError(err).Warn("failed to append imported usage event to archive")
+		}
+	}
 
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
@@ -398,13 +531,17 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
 		detail.Failed,
+		detail.LatencyMs,
+		detail.ProviderFirstTokenLatencyMs,
+		detail.FirstTokenLatencyMs,
+		detail.GenerationDurationMs,
 		tokens.InputTokens,
 		tokens.OutputTokens,
 		tokens.ReasoningTokens,
@@ -524,6 +661,9 @@ func NormalizeLegacyZeroStreamingTimings(snapshot StatisticsSnapshot) Statistics
 	for apiName, apiSnapshot := range snapshot.APIs {
 		for modelName, modelSnapshot := range apiSnapshot.Models {
 			for idx := range modelSnapshot.Details {
+				if modelSnapshot.Details[idx].ProviderFirstTokenLatencyMs == 0 {
+					modelSnapshot.Details[idx].ProviderFirstTokenLatencyMs = unknownStreamingTimingMs
+				}
 				if modelSnapshot.Details[idx].FirstTokenLatencyMs == 0 {
 					modelSnapshot.Details[idx].FirstTokenLatencyMs = unknownStreamingTimingMs
 				}

@@ -1,9 +1,14 @@
 package helps
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -66,21 +71,53 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 func TestUsageReporterBuildRecordIncludesStreamingTimings(t *testing.T) {
 	base := time.Date(2026, 4, 14, 20, 0, 0, 0, time.UTC)
 	reporter := &UsageReporter{
-		provider:      "codex",
-		model:         "gpt-5.4",
-		requestedAt:   base,
-		firstOutputAt: base.Add(1200 * time.Millisecond),
+		provider:            "codex",
+		model:               "gpt-5.4",
+		providerRequestedAt: base,
+		requestedAt:         base.Add(200 * time.Millisecond),
+		firstOutputAt:       base.Add(1200 * time.Millisecond),
 		now: func() time.Time {
 			return base.Add(4700 * time.Millisecond)
 		},
 	}
 
 	record := reporter.buildRecord(usage.Detail{OutputTokens: 70, TotalTokens: 70}, false)
-	if record.FirstTokenLatency != 1200*time.Millisecond {
-		t.Fatalf("first token latency = %v, want %v", record.FirstTokenLatency, 1200*time.Millisecond)
+	if record.FirstTokenLatency != time.Second {
+		t.Fatalf("first token latency = %v, want %v", record.FirstTokenLatency, time.Second)
+	}
+	if record.ProviderFirstTokenLatency != 1200*time.Millisecond {
+		t.Fatalf("provider first token latency = %v, want %v", record.ProviderFirstTokenLatency, 1200*time.Millisecond)
 	}
 	if record.GenerationDuration != 3500*time.Millisecond {
 		t.Fatalf("generation duration = %v, want %v", record.GenerationDuration, 3500*time.Millisecond)
+	}
+}
+
+func TestNewUsageReporterUsesRequestStartForEndToEndFirstTokenLatency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	base := time.Date(2026, 4, 16, 8, 0, 0, 0, time.UTC)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	req = req.WithContext(cliproxyexecutor.WithRequestStart(req.Context(), base))
+
+	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginCtx.Request = req
+
+	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	ctx = cliproxyexecutor.WithProviderFirstByteStart(ctx, base.Add(250*time.Millisecond))
+
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5.4", nil)
+	reporter.firstOutputAt = base.Add(1200 * time.Millisecond)
+	reporter.now = func() time.Time {
+		return base.Add(2200 * time.Millisecond)
+	}
+
+	record := reporter.buildRecord(usage.Detail{OutputTokens: 10, TotalTokens: 10}, false)
+	if record.FirstTokenLatency != 1200*time.Millisecond {
+		t.Fatalf("first token latency = %v, want %v", record.FirstTokenLatency, 1200*time.Millisecond)
+	}
+	if record.ProviderFirstTokenLatency != 950*time.Millisecond {
+		t.Fatalf("provider first token latency = %v, want %v", record.ProviderFirstTokenLatency, 950*time.Millisecond)
 	}
 }
 

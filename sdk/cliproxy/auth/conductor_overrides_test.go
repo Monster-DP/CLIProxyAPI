@@ -228,9 +228,10 @@ func (e *authFallbackExecutor) StreamCalls() []string {
 type firstByteTimeoutAuthExecutor struct {
 	id string
 
-	mu           sync.Mutex
-	streamCalls  []string
-	hangingAuths map[string]struct{}
+	mu            sync.Mutex
+	streamCalls   []string
+	blockingAuths map[string]struct{}
+	hangingAuths  map[string]struct{}
 }
 
 func (e *firstByteTimeoutAuthExecutor) Identifier() string {
@@ -244,8 +245,14 @@ func (e *firstByteTimeoutAuthExecutor) Execute(context.Context, *Auth, cliproxye
 func (e *firstByteTimeoutAuthExecutor) ExecuteStream(ctx context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	e.mu.Lock()
 	e.streamCalls = append(e.streamCalls, auth.ID)
+	_, block := e.blockingAuths[auth.ID]
 	_, hang := e.hangingAuths[auth.ID]
 	e.mu.Unlock()
+
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	if hang {
@@ -621,6 +628,72 @@ func TestManagerExecuteStream_FirstByteTimeoutFallsBackAndSuspendsAuth(t *testin
 	}
 	if state.LastError.HTTPStatus != http.StatusRequestTimeout {
 		t.Fatalf("last error status = %d, want %d", state.LastError.HTTPStatus, http.StatusRequestTimeout)
+	}
+}
+
+func TestManagerExecuteStream_FirstByteTimeoutDuringExecuteStreamFallsBackAndSuspendsAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{
+		SDKConfig: internalconfig.SDKConfig{
+			Streaming: internalconfig.StreamingConfig{
+				FirstByteTimeoutMS: 20,
+			},
+		},
+	})
+	executor := &firstByteTimeoutAuthExecutor{
+		id:            "claude",
+		blockingAuths: map[string]struct{}{"aa-slow-auth": {}},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	slowAuth := &Auth{ID: "aa-slow-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(slowAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(slowAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), slowAuth); errRegister != nil {
+		t.Fatalf("register slow auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	request := cliproxyexecutor.Request{Model: model}
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+
+	streamResult, errExecute := m.ExecuteStream(ctx, []string{"claude"}, request, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute stream error = %v, want success after timing out blocked auth", errExecute)
+	}
+
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v, want success", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != goodAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(payload), goodAuth.ID)
+	}
+
+	got := executor.StreamCalls()
+	want := []string{slowAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

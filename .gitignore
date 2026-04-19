@@ -12,6 +12,7 @@ data/*
 logs/*
 conv/*
 temp/*
+.tmp/*
 refs/*
 
 # Storage backends

@@ -333,8 +333,26 @@ func TestServerStopFlushesUsageStatisticsPersistence(t *testing.T) {
 		t.Fatalf("LoadSnapshotFromFile returned error: %v", err)
 	}
 	modelSnapshot, ok := snapshot.APIs["stop-flush-key"].Models["gpt-5.4"]
-	if !ok || len(modelSnapshot.Details) == 0 {
-		t.Fatalf("expected stop to flush usage statistics, snapshot=%+v", snapshot.APIs["stop-flush-key"])
+	if !ok {
+		t.Fatalf("expected stop to flush usage statistics summary, snapshot=%+v", snapshot.APIs["stop-flush-key"])
+	}
+	if modelSnapshot.TotalRequests != 1 {
+		t.Fatalf("model total_requests = %d, want 1", modelSnapshot.TotalRequests)
+	}
+	if len(modelSnapshot.Details) != 0 {
+		t.Fatalf("summary details len = %d, want 0", len(modelSnapshot.Details))
+	}
+
+	archive, err := usage.NewEventArchive(filepath.Join(filepath.Dir(usagePath), "usage-events"))
+	if err != nil {
+		t.Fatalf("NewEventArchive returned error: %v", err)
+	}
+	page, err := archive.Query(usage.EventQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("archive Query returned error: %v", err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatalf("archive items len = %d, want 1", len(page.Items))
 	}
 }
 
